@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Conversor Amstrad CPC Modo 0 — vshift + paleta optimizada</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { --gap:12px; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; padding:18px; color:#111; }
+    h1 { font-size:18px; margin:0 0 12px 0; }
+    .controls { display:flex; flex-wrap:wrap; gap:var(--gap); align-items:center; margin-bottom:14px; }
+    .control { display:flex; flex-direction:column; gap:6px; }
+    label { font-weight:600; font-size:13px; }
+    input[type="range"] { width:240px; }
+    .previews { display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap; margin-bottom:14px; }
+    .card { border:1px solid #ddd; padding:10px; border-radius:6px; background:#fff; }
+    .card h3 { margin:0 0 8px 0; font-size:13px; }
+    canvas { image-rendering: pixelated; border:1px solid #000; background:#000; display:block; }
+    .small { font-size:12px; color:#444; margin-top:6px; }
+    button { padding:8px 12px; font-size:13px; cursor:pointer; }
+    textarea { width:100%; height:160px; font-family: monospace; font-size:13px; }
+    .palette-row { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+    .swatch { width:28px; height:20px; border:1px solid #222; }
+    .actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  </style>
+</head>
+<body>
+  <h1>Conversor Amstrad CPC Modo 0 — vshift y paleta optimizada</h1>
+
+  <div class="controls">
+    <div class="control">
+      <label for="fileInput">Imagen</label>
+      <input id="fileInput" type="file" accept="image/*">
+    </div>
+
+    <div class="control">
+      <label for="scaleMode">Tipo de escalado</label>
+      <select id="scaleMode">
+        <option value="contain">Contain (mantiene proporción, rellena con color)</option>
+        <option value="cover">Cover (recorta para llenar)</option>
+        <option value="fitWidth">Fit width (ajusta ancho 160)</option>
+        <option value="fitHeight">Fit height (ajusta alto 200)</option>
+        <option value="stretch">Stretch (deforma a 160×200)</option>
+        <option value="centerCrop">Center crop (recorte centrado)</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label for="bgColor">Color de fondo (franjas)</label>
+      <input id="bgColor" type="color" value="#000000">
+    </div>
+
+    <div class="control">
+      <label for="zoom">Zoom vista previa</label>
+      <select id="zoom">
+        <option value="1">x1</option>
+        <option value="2" selected>x2</option>
+        <option value="3">x3</option>
+        <option value="4">x4</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label for="vshiftRange">Desplazamiento vertical (vshift)</label>
+      <input id="vshiftRange" type="range" min="0" max="199" value="0">
+      <div style="display:flex; gap:8px; align-items:center;">
+        <input id="vshiftNumber" type="number" min="0" max="199" value="0">
+        <button id="resetShift">Reset</button>
+      </div>
+      <div class="small">Ajusta para compensar el desplazamiento vertical en el emulador.</div>
+    </div>
+
+    <div class="control">
+      <label>&nbsp;</label>
+      <div class="actions">
+        <button id="convertBtn">Generar BIN CPC (0x4000 bytes)</button>
+        <button id="exportLinearBtn">Exportar 16000 bytes lineales</button>
+      </div>
+      <div class="small">Descarga 16.384 bytes para &C000 o 16.000 bytes en orden de pantalla.</div>
+    </div>
+  </div>
+
+  <div class="previews">
+    <div class="card">
+      <h3>Vista previa escalada (160×200)</h3>
+      <canvas id="previewScaled" width="160" height="200"></canvas>
+      <div class="small">Imagen tras aplicar el escalado seleccionado.</div>
+    </div>
+
+    <div class="card">
+      <h3>Vista previa CPC (cuantizada a 16 colores)</h3>
+      <canvas id="previewCPC" width="160" height="200"></canvas>
+      <div class="small">Simulación de Modo 0. Ajusta vshift y vuelve a generar el BIN.</div>
+      <div style="margin-top:8px;">
+        <button id="optimizePaletteBtn">Optimizar paleta (k‑means 16)</button>
+        <button id="useDefaultPaletteBtn">Usar paleta por defecto</button>
+        <div class="palette-row" id="paletteSwatches"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:14px;">
+    <h3>Líneas BASIC para configurar la paleta</h3>
+    <div class="small">Generadas a partir de la paleta activa (pulsa Optimizar paleta para calcular desde la imagen).</div>
+    <textarea id="basicOutput" readonly></textarea>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button id="copyBasic">Copiar al portapapeles</button>
+      <button id="generateDataBlock">Generar DATA+FOR (versión compacta)</button>
+    </div>
+  </div>
+
+  <script>
+  // Constantes CPC
+  const targetW = 160, targetH = 200;
+  const BYTES_PER_LINE = 80;
+  const VRAM_SIZE = 0x4000; // 16384 bytes
+
+  // Estado global
+  let imgBlobUrl = null;
+  let imgDataGlobal = null; // Uint8ClampedArray RGBA 160x200
+  let pal16Global = null;   // array de 16 {r,g,b} en valores 0..255
+  let pal27 = null;         // paleta 27 colores
+
+  // Generar paleta 27 colores (niveles 0x00,0x80,0xFF)
+  function generateCpc27Palette() {
+    const levels = [0x00, 0x80, 0xFF];
+    const palette = [];
+    for (let r of levels) for (let g of levels) for (let b of levels) palette.push({r,g,b});
+    return palette;
+  }
+
+  // Paleta por defecto (selección de 16 índices de pal27)
+  function defaultPal16From27(pal27) {
+    const indices = [0,2,6,8,12,14,18,20,22,24,26,10,16,4,1,25];
+    return indices.map(i => pal27[i]);
+  }
+
+  // Mapeo RGB -> índice pal16 por distancia euclídea
+  function nearestCpcIndex(r,g,b,pal16) {
+    let bestI=0, bestD=Infinity;
+    for (let i=0;i<pal16.length;i++){
+      const dr=r-pal16[i].r, dg=g-pal16[i].g, db=b-pal16[i].b;
+      const d = dr*dr + dg*dg + db*db;
+      if (d < bestD) { bestD = d; bestI = i; }
+    }
+    return bestI & 0x0F;
+  }
+
+  // Empaquetado Modo 0 (2 píxeles por byte)
+  function packMode0Byte(left4,right4){
+    let b=0;
+    if (left4 & 0x8) b |= (1<<7);
+    if (left4 & 0x4) b |= (1<<3);
+    if (left4 & 0x2) b |= (1<<5);
+    if (left4 & 0x1) b |= (1<<1);
+    if (right4 & 0x8) b |= (1<<6);
+    if (right4 & 0x4) b |= (1<<2);
+    if (right4 & 0x2) b |= (1<<4);
+    if (right4 & 0x1) b |= (1<<0);
+    return b;
+  }
+
+  // Mapeo VRAM CPC (no lineal)
+  function cpcVramOffset(y, xByte) {
+    const block = (y >> 3);
+    const rowInBlock = (y & 0x07);
+    return (rowInBlock * 0x800) + (block * 0x50) + xByte;
+  }
+
+  // Escalado optimizado: calcula rectángulo destino
+  function computeScaledRect(imgW, imgH, mode) {
+    const scaleW = targetW / imgW;
+    const scaleH = targetH / imgH;
+    let sw, sh, dx, dy;
+    switch(mode){
+      case 'contain': {
+        const s = Math.min(scaleW, scaleH);
+        sw = Math.round(imgW * s); sh = Math.round(imgH * s);
+        dx = Math.floor((targetW - sw)/2); dy = Math.floor((targetH - sh)/2);
+        break;
+      }
+      case 'cover': {
+        const s = Math.max(scaleW, scaleH);
+        sw = Math.round(imgW * s); sh = Math.round(imgH * s);
+        dx = Math.floor((targetW - sw)/2); dy = Math.floor((targetH - sh)/2);
+        break;
+      }
+      case 'fitWidth': {
+        const s = scaleW;
+        sw = targetW; sh = Math.round(imgH * s);
+        dx = 0; dy = Math.floor((targetH - sh)/2);
+        break;
+      }
+      case 'fitHeight': {
+        const s = scaleH;
+        sh = targetH; sw = Math.round(imgW * s);
+        dx = Math.floor((targetW - sw)/2); dy = 0;
+        break;
+      }
+      case 'stretch': {
+        sw = targetW; sh = targetH; dx = 0; dy = 0; break;
+      }
+      case 'centerCrop': {
+        if (imgW >= targetW && imgH >= targetH) {
+          sw = targetW; sh = targetH; dx = 0; dy = 0;
+        } else {
+          const s = Math.max(scaleW, scaleH);
+          sw = Math.round(imgW * s); sh = Math.round(imgH * s);
+          dx = Math.floor((targetW - sw)/2); dy = Math.floor((targetH - sh)/2);
+        }
+        break;
+      }
+      default: {
+        const s = Math.min(scaleW, scaleH);
+        sw = Math.round(imgW * s); sh = Math.round(imgH * s);
+        dx = Math.floor((targetW - sw)/2); dy = Math.floor((targetH - sh)/2);
+      }
+    }
+    return {sw,sh,dx,dy};
+  }
+
+  // Renderiza vistas previas desde blob URL
+  async function renderPreviewsFromBlob(blobUrl) {
+    const img = new Image();
+    img.src = blobUrl;
+    await img.decode();
+
+    const off = document.createElement('canvas');
+    off.width = targetW; off.height = targetH;
+    const ctx = off.getContext('2d', {alpha:false});
+    ctx.imageSmoothingEnabled = false;
+
+    const mode = document.getElementById('scaleMode').value;
+    const bg = document.getElementById('bgColor').value || '#000000';
+    const {sw,sh,dx,dy} = computeScaledRect(img.width, img.height, mode);
+
+    ctx.fillStyle = bg;
+    ctx.fillRect(0,0,targetW,targetH);
+
+    if (mode === 'centerCrop' && img.width >= targetW && img.height >= targetH) {
+      const sx = Math.floor((img.width - targetW)/2);
+      const sy = Math.floor((img.height - targetH)/2);
+      ctx.drawImage(img, sx, sy, targetW, targetH, 0, 0, targetW, targetH);
+    } else {
+      ctx.drawImage(img, dx, dy, sw, sh);
+    }
+
+    imgDataGlobal = ctx.getImageData(0,0,targetW,targetH).data;
+
+    // Si no hay paleta activa, usar por defecto
+    if (!pal27) pal27 = generateCpc27Palette();
+    if (!pal16Global) pal16Global = defaultPal16From27(pal27);
+
+    // Escalada preview
+    const previewScaled = document.getElementById('previewScaled');
+    const sctx = previewScaled.getContext('2d', {alpha:false});
+    sctx.imageSmoothingEnabled = false;
+    sctx.putImageData(ctx.getImageData(0,0,targetW,targetH), 0, 0);
+
+    // CPC preview (cuantizada con pal16Global)
+    renderCpcPreview();
+    applyZoom();
+  }
+
+  // Renderiza la vista CPC usando pal16Global
+  function renderCpcPreview() {
+    if (!imgDataGlobal || !pal16Global) return;
+    const previewCPC = document.getElementById('previewCPC');
+    const cctx = previewCPC.getContext('2d', {alpha:false});
+    cctx.imageSmoothingEnabled = false;
+    const out = cctx.createImageData(targetW, targetH);
+
+    for (let y=0;y<targetH;y++){
+      for (let x=0;x<targetW;x++){
+        const idx = (y*targetW + x)*4;
+        const r = imgDataGlobal[idx], g = imgDataGlobal[idx+1], b = imgDataGlobal[idx+2];
+        const i = nearestCpcIndex(r,g,b,pal16Global);
+        const col = pal16Global[i];
+        out.data[idx] = col.r; out.data[idx+1] = col.g; out.data[idx+2] = col.b; out.data[idx+3] = 255;
+      }
+    }
+    cctx.putImageData(out, 0, 0);
+    showPaletteSwatches();
+    generateBasicLinesFromPal();
+  }
+
+  // Construye VRAM completa 0x4000 aplicando vshift
+  function buildVramFromImageDataWithShift(vshift = 0) {
+    const vram = new Uint8Array(VRAM_SIZE); // inicializado a 0
+    for (let y = 0; y < targetH; y++) {
+      const yDst = (y + vshift) % targetH;
+      for (let xByte = 0; xByte < BYTES_PER_LINE; xByte++) {
+        const xLeft = xByte * 2;
+        const idxL = (y * targetW + xLeft) * 4;
+        const idxR = (y * targetW + xLeft + 1) * 4;
+
+        const lR = imgDataGlobal[idxL], lG = imgDataGlobal[idxL+1], lB = imgDataGlobal[idxL+2];
+        const rR = imgDataGlobal[idxR], rG = imgDataGlobal[idxR+1], rB = imgDataGlobal[idxR+2];
+
+        const left4 = nearestCpcIndex(lR, lG, lB, pal16Global);
+        const right4 = nearestCpcIndex(rR, rG, rB, pal16Global);
+
+        const packed = packMode0Byte(left4, right4);
+        const offset = cpcVramOffset(yDst, xByte);
+        vram[offset] = packed;
+      }
+    }
+    return vram;
+  }
+
+  // Construye 16000 bytes lineales (orden de pantalla)
+  function buildLinearFromImageData() {
+    const arr = new Uint8Array(16000);
+    let p = 0;
+    for (let y=0;y<targetH;y++){
+      for (let xByte=0;xByte<BYTES_PER_LINE;xByte++){
+        const xLeft = xByte*2;
+        const idxL = (y*targetW + xLeft)*4;
+        const idxR = (y*targetW + xLeft + 1)*4;
+        const lR = imgDataGlobal[idxL], lG = imgDataGlobal[idxL+1], lB = imgDataGlobal[idxL+2];
+        const rR = imgDataGlobal[idxR], rG = imgDataGlobal[idxR+1], rB = imgDataGlobal[idxR+2];
+        const left4 = nearestCpcIndex(lR,lG,lB,pal16Global);
+        const right4 = nearestCpcIndex(rR,rG,rB,pal16Global);
+        arr[p++] = packMode0Byte(left4,right4);
+      }
+    }
+    return arr;
+  }
+
+  // Descargar BIN (0x4000 bytes) aplicando vshift actual
+  function generateAndDownloadBin() {
+    if (!imgDataGlobal || !pal16Global) { alert('Primero carga una imagen.'); return; }
+    const vshift = parseInt(document.getElementById('vshiftNumber').value, 10) || 0;
+    const vram = buildVramFromImageDataWithShift(vshift);
+    const blob = new Blob([vram], { type: 'application/octet-stream' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'cpc_mode0_screen.bin';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 600);
+  }
+
+  // Descargar 16000 bytes lineales
+  function exportLinearBin() {
+    if (!imgDataGlobal || !pal16Global) { alert('Primero carga una imagen.'); return; }
+    const arr = buildLinearFromImageData();
+    const blob = new Blob([arr], { type: 'application/octet-stream' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'cpc_mode0_screen_linear.bin';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 600);
+  }
+
+  // K-means simple (RGB) para k clusters
+  function kmeansSampled(pixels, k=16, maxIter=20, sampleLimit=20000) {
+    // pixels: array of [r,g,b,...] (Uint8ClampedArray)
+    // sample to speed up
+    const total = pixels.length / 4;
+    const indices = [];
+    if (total > sampleLimit) {
+      // random sample
+      const step = Math.floor(total / sampleLimit);
+      for (let i=0;i<total;i+=step) indices.push(i);
+    } else {
+      for (let i=0;i<total;i++) indices.push(i);
+    }
+
+    // init centroids randomly from samples
+    const centroids = [];
+    for (let i=0;i<k;i++){
+      const idx = indices[Math.floor(Math.random()*indices.length)];
+      const base = idx*4;
+      centroids.push([pixels[base], pixels[base+1], pixels[base+2]]);
+    }
+
+    for (let iter=0; iter<maxIter; iter++){
+      const sums = Array.from({length:k}, ()=>[0,0,0,0]); // r,g,b,count
+      // assign
+      for (let s=0; s<indices.length; s++){
+        const i = indices[s];
+        const base = i*4;
+        const r = pixels[base], g = pixels[base+1], b = pixels[base+2];
+        let best = 0, bestD = Infinity;
+        for (let c=0;c<k;c++){
+          const dr = r - centroids[c][0], dg = g - centroids[c][1], db = b - centroids[c][2];
+          const d = dr*dr + dg*dg + db*db;
+          if (d < bestD) { bestD = d; best = c; }
+        }
+        sums[best][0] += r; sums[best][1] += g; sums[best][2] += b; sums[best][3] += 1;
+      }
+      // recompute centroids
+      let moved = false;
+      for (let c=0;c<k;c++){
+        if (sums[c][3] === 0) continue;
+        const nr = Math.round(sums[c][0] / sums[c][3]);
+        const ng = Math.round(sums[c][1] / sums[c][3]);
+        const nb = Math.round(sums[c][2] / sums[c][3]);
+        if (nr !== centroids[c][0] || ng !== centroids[c][1] || nb !== centroids[c][2]) {
+          moved = true;
+          centroids[c] = [nr, ng, nb];
+        }
+      }
+      if (!moved) break;
+    }
+    // return centroids as array of {r,g,b}
+    return centroids.map(c => ({r:c[0], g:c[1], b:c[2]}));
+  }
+
+  // Mapear un color RGB al color más cercano de pal27 y devolver el valor BASIC (OUT)
+  function rgbToAmsdosValue(rgb) {
+    // pal27 entries are exactly 0x00,0x80,0xFF so map to indices 0..2
+    // find nearest pal27 entry
+    let bestI = 0, bestD = Infinity;
+    for (let i=0;i<pal27.length;i++){
+      const dr = rgb.r - pal27[i].r, dg = rgb.g - pal27[i].g, db = rgb.b - pal27[i].b;
+      const d = dr*dr + dg*dg + db*db;
+      if (d < bestD) { bestD = d; bestI = i; }
+    }
+    const p = pal27[bestI];
+    const rIndex = p.r === 0x00 ? 0 : (p.r === 0x80 ? 1 : 2);
+    const gIndex = p.g === 0x00 ? 0 : (p.g === 0x80 ? 1 : 2);
+    const bIndex = p.b === 0x00 ? 0 : (p.b === 0x80 ? 1 : 2);
+    return { value: rIndex*16 + gIndex*4 + bIndex, mappedColor: p };
+  }
+
+  // Genera paleta optimizada por k-means y actualiza pal16Global
+  function optimizePaletteFromImage() {
+    if (!imgDataGlobal) { alert('Primero carga una imagen.'); return; }
+    if (!pal27) pal27 = generateCpc27Palette();
+    // Ejecutar k-means sobre imgDataGlobal
+    const centroids = kmeansSampled(imgDataGlobal, 16, 20, 20000);
+    // Mapear cada centroide al color pal27 más cercano y construir pal16Global
+    const pal16 = centroids.map(c => {
+      const mapped = rgbToAmsdosValue(c);
+      return mapped.mappedColor;
+    });
+    pal16Global = pal16;
+    renderCpcPreview();
+    // Generar BASIC lines y mostrarlas
+    generateBasicLinesFromPal();
+  }
+
+  // Mostrar swatches de la paleta actual
+  function showPaletteSwatches() {
+    const container = document.getElementById('paletteSwatches');
+    container.innerHTML = '';
+    if (!pal16Global) return;
+    pal16Global.forEach((c, i) => {
+      const div = document.createElement('div');
+      div.className = 'swatch';
+      div.title = `Pal ${i}: rgb(${c.r},${c.g},${c.b})`;
+      div.style.background = `rgb(${c.r},${c.g},${c.b})`;
+      container.appendChild(div);
+    });
+  }
+
+  // Genera líneas BASIC OUT y DATA+FOR a partir de pal16Global
+  function generateBasicLinesFromPal() {
+    if (!pal16Global) { document.getElementById('basicOutput').value = ''; return; }
+    if (!pal27) pal27 = generateCpc27Palette();
+
+    // Para cada pal16 color, calcular el valor OUT v = R*16 + G*4 + B con índices 0..2
+    const values = pal16Global.map(c => {
+      // encontrar el índice en pal27 para obtener niveles exactos 0/128/255
+      let bestI=0, bestD=Infinity;
+      for (let i=0;i<pal27.length;i++){
+        const dr = c.r - pal27[i].r, dg = c.g - pal27[i].g, db = c.b - pal27[i].b;
+        const d = dr*dr + dg*dg + db*db;
+        if (d < bestD) { bestD = d; bestI = i; }
+      }
+      const p = pal27[bestI];
+      const rIndex = p.r === 0x00 ? 0 : (p.r === 0x80 ? 1 : 2);
+      const gIndex = p.g === 0x00 ? 0 : (p.g === 0x80 ? 1 : 2);
+      const bIndex = p.b === 0x00 ? 0 : (p.b === 0x80 ? 1 : 2);
+      return rIndex*16 + gIndex*4 + bIndex;
+    });
+
+    // Generar líneas OUT
+    let outLines = '';
+    for (let i=0;i<16;i++){
+      const hexPort = '&7F' + (i.toString(16).toUpperCase().padStart(2,'0'));
+      outLines += `OUT ${hexPort},${values[i]}  : REM PALETTE ${i}\n`;
+    }
+
+    // Generar DATA + FOR/READ versión compacta
+    const dataLine = '10 DATA ' + values.join(',') + '\n';
+    const forBlock = '20 FOR i=0 TO 15\n30 READ v\n40 OUT &7F00+i, v\n50 NEXT i\n60 PRINT "PALETA CARGADA"\n';
+    const compact = dataLine + forBlock;
+
+    document.getElementById('basicOutput').value = outLines + '\n' + compact;
+  }
+
+  // Copiar BASIC al portapapeles
+  async function copyBasicToClipboard() {
+    const txt = document.getElementById('basicOutput').value;
+    if (!txt) return;
+    try {
+      await navigator.clipboard.writeText(txt);
+      alert('Líneas BASIC copiadas al portapapeles.');
+    } catch (e) {
+      alert('No se pudo copiar automáticamente. Selecciona y copia manualmente.');
+    }
+  }
+
+  // Generar DATA+FOR en textarea (ya se incluye en basicOutput, pero botón fuerza regenerar)
+  function generateDataBlock() {
+    generateBasicLinesFromPal();
+    alert('DATA+FOR añadido al área de texto. Copia y pégalo en tu emulador.');
+  }
+
+  // Zoom visual
+  function applyZoom(){
+    const z = parseInt(document.getElementById('zoom').value,10) || 1;
+    const canvases = [document.getElementById('previewScaled'), document.getElementById('previewCPC')];
+    canvases.forEach(cv => {
+      cv.style.width = (targetW * z) + 'px';
+      cv.style.height = (targetH * z) + 'px';
+    });
+  }
+
+  // Sincronizar range y number para vshift
+  const vshiftRange = document.getElementById('vshiftRange');
+  const vshiftNumber = document.getElementById('vshiftNumber');
+  vshiftRange.addEventListener('input', () => { vshiftNumber.value = vshiftRange.value; if (imgBlobUrl) renderPreviewsFromBlob(imgBlobUrl); });
+  vshiftNumber.addEventListener('input', () => {
+    let v = parseInt(vshiftNumber.value,10);
+    if (isNaN(v)) v = 0;
+    if (v < 0) v = 0; if (v > 199) v = 199;
+    vshiftNumber.value = v;
+    vshiftRange.value = v;
+    if (imgBlobUrl) renderPreviewsFromBlob(imgBlobUrl);
+  });
+  document.getElementById('resetShift').addEventListener('click', () => { vshiftRange.value = 0; vshiftNumber.value = 0; if (imgBlobUrl) renderPreviewsFromBlob(imgBlobUrl); });
+
+  // Eventos UI
+  document.getElementById('fileInput').addEventListener('change', async () => {
+    const file = document.getElementById('fileInput').files?.[0];
+    if (!file) return;
+    if (imgBlobUrl) URL.revokeObjectURL(imgBlobUrl);
+    imgBlobUrl = URL.createObjectURL(file);
+    // reset paleta a por defecto al cargar nueva imagen
+    pal27 = generateCpc27Palette();
+    pal16Global = defaultPal16From27(pal27);
+    await renderPreviewsFromBlob(imgBlobUrl);
+  });
+
+  document.getElementById('scaleMode').addEventListener('change', async () => { if (imgBlobUrl) await renderPreviewsFromBlob(imgBlobUrl); });
+  document.getElementById('bgColor').addEventListener('change', async () => { if (imgBlobUrl) await renderPreviewsFromBlob(imgBlobUrl); });
+  document.getElementById('zoom').addEventListener('change', applyZoom);
+  document.getElementById('convertBtn').addEventListener('click', generateAndDownloadBin);
+  document.getElementById('exportLinearBtn').addEventListener('click', exportLinearBin);
+  document.getElementById('optimizePaletteBtn').addEventListener('click', optimizePaletteFromImage);
+  document.getElementById('useDefaultPaletteBtn').addEventListener('click', () => { pal27 = generateCpc27Palette(); pal16Global = defaultPal16From27(pal27); renderCpcPreview(); });
+  document.getElementById('copyBasic').addEventListener('click', copyBasicToClipboard);
+  document.getElementById('generateDataBlock').addEventListener('click', generateDataBlock);
+
+  // Inicializar paletas y zoom
+  pal27 = generateCpc27Palette();
+  pal16Global = defaultPal16From27(pal27);
+  applyZoom();
+  generateBasicLinesFromPal();
+  showPaletteSwatches();
+  </script>
+</body>
+</html>
