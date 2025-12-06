@@ -26,9 +26,8 @@
 </head>
 <body>
   <h1>Conversor Amstrad CPC Modo 0 — vshift y paleta optimizada</h1>
-<div id="ibm5170-cga"></div>
-<script src="pcx86.js"></script>
   
+
 
   <div class="controls">
     <div class="control">
@@ -565,5 +564,14 @@
   generateBasicLinesFromPal();
   showPaletteSwatches();
   </script>
+<script src="https://www.pcjs.org/machines/pcx86.js"></script>
+
+<script>
+    embedPCx86(
+        "mi-maquina-cga", 
+        "https://www.pcjs.org/machines/pcx86/machine/5150/256k/machine.xml", 
+        "https://www.pcjs.org/machines/pcx86/machine/components.xsl"
+    );
+</script>  
 </body>
 </html>
